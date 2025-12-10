@@ -1,0 +1,21 @@
+# Archivos y carpetas de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos de Logs y Datos Generados
+/data/logs/*
+!/data/logs/.gitkeep  # (Opcional: puedes dejar un archivo .gitkeep vacío si quieres que la carpeta logs se suba, aunque esté vacía)
+*.csv
+
+# Entorno Virtual/Portable (Ignorar todo lo relacionado con el intérprete)
+/venv/
+/.venv/
+/python.exe
+/Lib/
+/Scripts/
+/Include/
+
+# IGNORAR ARCHIVOS DE CONFIGURACIÓN SENSIBLES ESPECÍFICOS
+/config/database.ini
