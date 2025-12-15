@@ -1,4 +1,6 @@
-# --- INICIO DEL ARCHIVO src/extractor.py (CORRECCIÓN FINAL DE TIPO Y LÍMITE SÚPER-ROBUSTA) ---
+EXTRACTOR
+
+# --- INICIO DEL ARCHIVO src/extractor.py ---
 import polars as pl
 from pathlib import Path
 import os
@@ -7,13 +9,13 @@ from datetime import datetime
 import csv
 import io 
 import re 
-from typing import Dict, List, Optional, Any
 
 # ==============================================================================
 # CONFIGURACIÓN CRÍTICA: LÍMITE DE CAMPO CSV
 # ==============================================================================
 # Aumentar el límite del campo CSV para manejar CLOBs grandes (10 MB).
-MAX_FIELD_SIZE = 10 * 1024 * 1024 
+# Esto soluciona: 'field larger than field limit (131072)'
+MAX_FIELD_SIZE = 10 * 1024 * 1024  # 10 MB
 try:
     csv.field_size_limit(MAX_FIELD_SIZE)
 except OverflowError:
@@ -23,18 +25,18 @@ except OverflowError:
 # CONFIGURACIÓN GENERAL
 # ==============================================================================
 
-# Tablas que requieren manejo manual
+# Tablas que requieren manejo manual 
 TABLES_MANUAL_CLEANUP = ['MVCARATULAS', 'CTSOCIOS', 'DTFIRMAS']
 
-# Columnas excluidas
+# Columnas excluidas (CLOBs, textos largos) para evitar errores de tipo/lectura en Polars
 COLUMNS_TO_EXCLUDE = {
-    'MVCARATULAS': ['DSOBJETO', 'DSDIRECCION'], 
-    'DTFIRMAS': ['DSCADORIGINAL', 'DSFIRMA'], 
+    'MVCARATULAS': ['DSOBJETO', 'DSDIRECCION'], # Campos CLOB/VARCHAR largos
+    'DTFIRMAS': ['DSCADORIGINAL', 'DSFIRMA'], # Campos CLOB (datos binarios/Base64)
     'CTSOCIOS': [], 
 }
 
 # Definición de tipos de datos forzados
-SCHEMA_OVERRIDES: Dict[str, Dict[str, pl.DataType]] = {
+SCHEMA_OVERRIDES = {
     'MVSOLICITUDES': {'DSNCI': pl.Utf8},
     'PAGO_PORTAL': {'NOCONFIRMACIONRS': pl.Utf8, 'NOREFERENCIARS': pl.Utf8},
     'MVVARACTO': {'NOVALOR': pl.Float64},
@@ -45,7 +47,7 @@ SCHEMA_OVERRIDES: Dict[str, Dict[str, pl.DataType]] = {
         'NOTOTAL': pl.Float64, 
     }, 
     
-    # MVCARATULAS: Forzado de tipos para las columnas restantes
+    # MVCARATULAS: Forzado de tipos para las columnas restantes (excluyendo DSOBJETO, DSDIRECCION)
     'MVCARATULAS': {
         'LLCARATULA': pl.Int64, 'LLOFICINA': pl.Int64, 'CRFME': pl.Utf8, 'FCAPERTURA': pl.Utf8, 'DSRFC': pl.Utf8, 
         'DSANTREG': pl.Utf8, 'DSDENSOCIAL': pl.Utf8, 'LLMUNICIPIO': pl.Int64, 'DSMUNICIPIO': pl.Utf8, 
@@ -53,7 +55,7 @@ SCHEMA_OVERRIDES: Dict[str, Dict[str, pl.DataType]] = {
         'LLTIPOSOCIEDAD': pl.Int64, 'DSDTIPOSOCIEDAD': pl.Utf8, 'LLNACIONALIDAD': pl.Int64, 'DSNACIONALIDAD': pl.Utf8, 
         'DSCURP': pl.Utf8, 'BOMORAL': pl.Utf8, 'LLESTATUSCARATULA': pl.Int64, 'BOACERV': pl.Utf8,
     },
-    
+    # DTFIRMAS: Forzado de tipos sin los CLOBs (DSCADORIGINAL, DSFIRMA)
     'DTFIRMAS': {
         'LLFIRMA': pl.Int64, 'LLMVFRMACTO': pl.Int64, 'LLUSUARIO': pl.Int64, 
         'DSHASH': pl.Utf8, 'FCFECHAFIRMA': pl.Utf8, 'LLETAPA': pl.Int64, 'NOSECUENCIA': pl.Int64,
@@ -70,7 +72,7 @@ TABLES_REQUIRING_MANUAL_HEADER = [
 # FUNCIONES DE UTILIDAD 
 # ==============================================================================
 
-def get_file_paths(table_name: str, root_path: Path) -> Optional[Path]:
+def get_file_paths(table_name: str, root_path: Path):
     """Busca el archivo de datos (.csv o .txt) para la tabla dada."""
     file_path_csv = root_path / f"{table_name}.csv"
     file_path_txt = root_path / f"{table_name}.txt"
@@ -80,19 +82,21 @@ def get_file_paths(table_name: str, root_path: Path) -> Optional[Path]:
         return file_path_txt
     return None 
 
+
 def sample_problematic_lines(file_path: Path, n_lines=10):
     """Muestra las primeras N líneas del archivo para inspección manual en caso de fallo."""
     print(f"\n--- MUESTRA DE LAS PRIMERAS {n_lines} LÍNEAS PARA INSPECCIÓN ({file_path.name}) ---")
     try:
-        # Uso de'latin1' 
+        # Abrimos en modo binario y usamos TextIOWrapper para manejar errores de encoding
         with open(file_path, 'rb') as f_bin:
              f = io.TextIOWrapper(f_bin, encoding='latin1', newline='')
              for i in range(n_lines):
-                 line = f.readline()
-                 if not line:
-                     break
-                 print(f"[{i+1}]: {line.strip()[:150]}...") 
+                line = f.readline()
+                if not line:
+                    break
+                print(f"[{i+1}]: {line.strip()[:150]}...") 
     except Exception as e:
+        # Si incluso la lectura de la muestra falla
         print(f"Error al leer la muestra: {e}")
     print("----------------------------------------------------------------------\n")
 
@@ -101,63 +105,62 @@ def sample_problematic_lines(file_path: Path, n_lines=10):
 # FUNCIÓN DE LIMPIEZA MANUAL PARA TABLAS PROBLEMÁTICAS
 # ==============================================================================
 
-def extract_with_manual_clean(table_name: str, file_path: Path, n_rows_limit: Optional[int] = None, all_columns: list = None) -> pl.DataFrame:
+def extract_with_manual_clean(table_name: str, file_path: Path, limit: int = None, all_columns: list = None) -> pl.DataFrame:
     
     print(f"--- INICIANDO LIMPIEZA MANUAL Y EXTRACCIÓN para {table_name} ---")
     
     clean_lines = []
     anomaly_log = []
     columns_to_exclude = set(COLUMNS_TO_EXCLUDE.get(table_name, []))
-    
-    # Ruta de la carpeta 'anomalies' para los logs
-    current_dir = Path(__file__).resolve().parent
-    ANOMALIES_DIR = current_dir.parent / 'anomalies'
-    
-    # 1. Determinar el delimitador
-    delimiter = '|' 
 
     try:
-        # --- LECTURA BINARIA ROBUSTA PARA EVITAR ERRORES DE ENCODING ---
+        # --- LECTURA BINARIA ROBUSTA PARA EVITAR ERRORES DE ENCODING (DTFIRMAS FIX) ---
+        # Abrimos en modo binario y usamos TextIOWrapper para la decodificación 'justo a tiempo'.
         with open(file_path, 'rb') as f_bin:
-            f = io.TextIOWrapper(f_bin, encoding='latin1', newline='') 
+            f = io.TextIOWrapper(f_bin, encoding='latin1', newline='')
             
-            reader = csv.reader(f, delimiter=delimiter, quotechar='"')
+            # reader tiene el límite de campo aumentado (10MB)
+            reader = csv.reader(f, delimiter='|', quotechar='"')
             # --- FIN LECTURA ROBUSTA ---
             
             # 1. Procesar encabezado
             if not all_columns:
                 header = next(reader) 
-                all_columns = [col.strip().strip('"') for col in header]
             else:
-                try:
-                    next(reader) 
-                except StopIteration:
-                    pass 
-
+                # Saltamos la primera línea (header)
+                f.readline()
+                
             columns_to_read = [col for col in all_columns if col not in columns_to_exclude]
-            clean_lines.append(delimiter.join(columns_to_read)) 
+            clean_lines.append('|'.join(columns_to_read)) # Escribimos el header limpio
 
             # 2. Iterar sobre las filas y aplicar limpieza
             for i, row in enumerate(reader):
                 
                 temp_row = list(row) 
+                # Longitud del HEADER ORIGINAL (incluyendo las excluidas)
                 expected_len = len(all_columns) 
                 
-                delimiter_replace = ' ' 
+                # --- LÓGICA DE LIMPIEZA DE CARACTERES PELIGROSOS ---
+                # Aplicamos limpieza estricta a TODAS las tablas manuales para evitar fallos de lectura de Python (CLOBs o saltos de línea).
                 temp_row = [
-                    val.replace('\n', ' ').replace('\r', ' ').replace('"', ' ').replace('|', delimiter_replace) 
+                    # Elimina saltos de línea (\n, \r), comillas internas (") y el separador '|' que causan errores de parsing.
+                    val.replace('\n', ' ').replace('\r', ' ').replace('"', ' ').replace('|', ' ') 
                     for val in temp_row
                 ]
                 # --- FIN LÓGICA DE LIMPIEZA DE CARACTERES ---
 
 
+                # --- LÓGICA DE SALVAMENTO PARA CLOBs (MVCARATULAS, DTFIRMAS) ---
                 if len(temp_row) > expected_len:
+                    # Si tiene más columnas, el CLOB se desbordó. Lo TRUNCAMOS a la longitud esperada.
                     anomaly_log.append(f"Registro truncado (CLOB desbordado): Linea {i+2} -> Obtenido {len(temp_row)}, Truncado a {expected_len}")
                     temp_row = temp_row[:expected_len]
 
                 elif len(temp_row) < expected_len:
+                    # Si tiene menos, la fila está rota de forma irreparable.
                     anomaly_log.append(f"Registro saltado (Longitud Corta): Linea {i+2} -> Esperado {expected_len}, Obtenido {len(temp_row)}")
                     continue
+                # --- FIN LÓGICA DE SALVAMENTO ---
 
                 # 3. Excluir columnas de la fila antes de unir
                 final_row = []
@@ -166,14 +169,14 @@ def extract_with_manual_clean(table_name: str, file_path: Path, n_rows_limit: Op
                         final_row.append(col_value)
                 
                 if len(final_row) != len(columns_to_read):
-                    anomaly_log.append(f"Registro saltado (Error Lógica Exclusión): Linea {i+2}")
-                    continue
+                     # Doble verificación por si la lógica de zip falló
+                     anomaly_log.append(f"Registro saltado (Error Lógica Exclusión): Linea {i+2}")
+                     continue
 
-                clean_lines.append(delimiter.join(final_row))
-                
-                if isinstance(n_rows_limit, int) and i >= n_rows_limit: 
+                clean_lines.append('|'.join(final_row))
+                if limit and i >= limit:
                     break
-                
+            
     except Exception as e:
         print(f"Error fatal durante la lectura manual: {e}")
         sample_problematic_lines(file_path)
@@ -181,8 +184,8 @@ def extract_with_manual_clean(table_name: str, file_path: Path, n_rows_limit: Op
         
     # 4. Registrar anomalías
     if anomaly_log:
-        log_file = ANOMALIES_DIR / f"{table_name}_manual_anomalies_{datetime.now():%Y%m%d_%H%M%S}.csv"
-        ANOMALIES_DIR.mkdir(exist_ok=True)
+        log_file = Path("anomalies") / f"{table_name}_manual_anomalies_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        log_file.parent.mkdir(exist_ok=True)
         with open(log_file, 'w', encoding='utf-8') as f:
             f.write("Anomaly_Details\n")
             for log in anomaly_log:
@@ -194,7 +197,7 @@ def extract_with_manual_clean(table_name: str, file_path: Path, n_rows_limit: Op
     
     df = pl.read_csv(
         io.StringIO(clean_data_str),
-        separator=delimiter,
+        separator='|',
         has_header=True,
         schema_overrides=SCHEMA_OVERRIDES.get(table_name, {}),
         encoding="utf8",
@@ -208,62 +211,52 @@ def extract_with_manual_clean(table_name: str, file_path: Path, n_rows_limit: Op
 
 
 # ==============================================================================
-# FUNCIÓN PRINCIPAL DE EXTRACCIÓN
+# FUNCIÓN PRINCIPAL DE EXTRACCIÓN (Dirige el tráfico)
 # ==============================================================================
 
-def extract_from_file(table_name: str, root_path: Path, limit: Optional[int] = None) -> pl.DataFrame:
-    """Función principal para dirigir la extracción robusta."""
-    print(f"--- INICIANDO EXTRACCIÓN (E) para {table_name} ---")
+def extract_from_file(table_name: str, root_path: Path, limit: int = None) -> pl.DataFrame:
     
     file_path = get_file_paths(table_name, root_path) 
     if not file_path:
         raise FileNotFoundError(f"No se encontró el archivo para '{table_name}'.")
     
-    print(f"  -> Archivo encontrado: {file_path.name}")
-    
-    # --- 1. Determinación de Columnas a Leer
-    columns_to_read: Optional[List[str]] = None 
+    # --- 1. Determinación de Columnas a Leer (MÉTODO MANUAL) ---
+    columns_to_read = None 
     columns_to_exclude = set(COLUMNS_TO_EXCLUDE.get(table_name, []))
-    all_columns: List[str] = []
-    
-    # === LÓGICA DE CORRECCIÓN DELIMITADOR ===
-    delimiter = ',' if file_path.suffix == '.csv' else '|'
-    
-    if table_name == 'MVCARATULAS':
-        delimiter = '|' 
-    # =======================================
+    all_columns = []
     
     if table_name in TABLES_REQUIRING_MANUAL_HEADER:
         try:
+            # Lectura del encabezado
+            # Usamos la lectura binaria robusta para obtener el header también
             with open(file_path, 'rb') as f_bin:
                  f = io.TextIOWrapper(f_bin, encoding='latin1', newline='')
                  header_line = f.readline().strip()
             
-            raw_columns = [col.strip().strip('"') for col in header_line.split(delimiter)]
+            raw_columns = [col.strip().strip('"') for col in header_line.split('|')]
             all_columns = [col for col in raw_columns if col]
             
             if not all_columns or len(all_columns) < 2:
                 raise ValueError("Encabezado inválido o no encontrado.")
 
         except Exception as e:
-            sample_problematic_lines(file_path)
             raise ValueError(f"Error al leer encabezado manualmente: {e}")
         
         columns_to_read = [col for col in all_columns if col not in columns_to_exclude]
         
         if columns_to_exclude and table_name not in TABLES_MANUAL_CLEANUP:
-              print(f"Excluyendo campos problemáticos: {columns_to_exclude}")
+             print(f"Excluyendo campos problemáticos: {columns_to_exclude}")
 
-    # --- 2. Desvío para Limpieza Manual
+    # --- 2. Desvío para Limpieza Manual ---
     if table_name in TABLES_MANUAL_CLEANUP:
-        return extract_with_manual_clean(table_name, file_path, limit, all_columns) 
+        return extract_with_manual_clean(table_name, file_path, limit, all_columns)
     
     # --- 3. Lectura Estándar de Polars para el resto de tablas ---
     
     print(f"Extrayendo datos de: {file_path.as_posix()}")
     
-    read_params: Dict[str, Any] = {
-        'separator': delimiter, 
+    read_params = {
+        'separator': '|', 
         'infer_schema_length': 100000, 
         'schema_overrides': SCHEMA_OVERRIDES.get(table_name, {}), 
         'n_rows': limit,
@@ -285,12 +278,13 @@ def extract_from_file(table_name: str, root_path: Path, limit: Optional[int] = N
             'ignore_errors': False, 
         })
     
+    # Lectura Final Estándar
     try:
-        df = pl.read_csv(file_path.as_posix(), **read_params)
+        df = pl.read_csv(file_path, **read_params)
     except Exception as e:
         sample_problematic_lines(file_path)
         raise e
 
     print(f"Datos extraídos: {df.shape[0]} filas, {df.shape[1]} columnas.")
     return df
-# --- FIN DEL ARCHIVO src/extractor.py
+# --- FIN DEL ARCHIVO src/extractor.py ---
